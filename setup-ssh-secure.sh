@@ -28,6 +28,7 @@ echo ""
 
 # ---------- Параметры ----------
 NEW_USER_NAME="${NEW_USER_NAME:-snegg000}"
+PUBKEY="${1:-${PUBKEY:-}}"
 # Порт: без shuf (не везде есть) — fallback на $RANDOM
 if [ -z "$NEW_SSH_PORT" ]; then
     if command -v shuf &>/dev/null; then
@@ -36,7 +37,6 @@ if [ -z "$NEW_SSH_PORT" ]; then
         NEW_SSH_PORT=$((20000 + RANDOM % 45001))
     fi
 fi
-PUBKEY="${1:-${PUBKEY:-}}"
 
 SSHD_CONFIG="/etc/ssh/sshd_config"
 BACKUP_SUFFIX="-BACKUP-$(date +%Y%m%d%H%M%S)"
