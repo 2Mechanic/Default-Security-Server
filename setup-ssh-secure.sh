@@ -168,6 +168,11 @@ if [ -f "$PAM_SSHD" ] && ! grep -q "pam_google_authenticator" "$PAM_SSHD"; then
     sed -i '1i auth       required     pam_google_authenticator.so nullok' "$PAM_SSHD"
     echo "[+] PAM: добавлен pam_google_authenticator (2FA)"
 fi
+# Убираем запрос пароля при SSH — только ключ + OTP. Пароль всё ещё нужен для sudo.
+if [ -f "$PAM_SSHD" ] && grep -qE "^[^#]*@include.*common-auth" "$PAM_SSHD"; then
+    sed -i -E 's/^([^#]*@include.*common-auth)/# \1  # отключено: вход по ключу+2FA без пароля/' "$PAM_SSHD"
+    echo "[+] PAM: отключён запрос пароля при SSH (оставлены ключ + 2FA)"
+fi
 if [ -f "$PAM_SSHD" ]; then
     grep -q "pam_google_authenticator" "$PAM_SSHD" && echo "[+] Проверка: строка pam_google_authenticator есть в $PAM_SSHD"
 fi
