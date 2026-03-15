@@ -344,3 +344,15 @@ echo "  Вход: ключ + код 2FA (OTP). Пароль нужен для su
 echo "=============================================="
 echo ""
 echo ">>> Всё готово. Изменения применены на этом хосте ($(hostname))."
+
+# Удалить локальную копию скрипта (если запускали файл, а не curl | bash)
+SCRIPT_PATH=""
+if [ -n "${BASH_SOURCE[0]}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/$(basename "${BASH_SOURCE[0]}")"
+elif [ -n "$0" ] && [ "$0" != "bash" ] && [ -f "$0" ]; then
+    SCRIPT_PATH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+fi
+if [ -n "$SCRIPT_PATH" ] && [ -f "$SCRIPT_PATH" ] && [ -w "$SCRIPT_PATH" ]; then
+    rm -f "$SCRIPT_PATH"
+    echo "[+] Локальная копия скрипта удалена."
+fi
