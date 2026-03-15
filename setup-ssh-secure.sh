@@ -22,17 +22,14 @@ if ! command -v useradd &>/dev/null || ! command -v groupadd &>/dev/null; then
     exit 1
 fi
 
-echo ">>> v2 — chown по USER_GROUP (id -gn), не user:user"
+echo ">>> v3 — sed с #, ключ запрашивается после создания пользователя"
 echo ">>> Хост: $(hostname). Запуск на этом сервере. Пользователь: root."
-echo ">>> Если настраиваешь другой сервер — зайди на него по SSH и запусти скрипт там."
 echo ""
 
 # ---------- Параметры ----------
-# Сбрасываем env, чтобы не подхватить admin с сервера — дефолт только из скрипта
 unset NEW_USER_NAME
 NEW_USER_NAME="${NEW_USER_NAME:-snegg000}"
 PUBKEY="${1:-${PUBKEY:-}}"
-# Порт: без shuf (не везде есть) — fallback на $RANDOM
 if [ -z "$NEW_SSH_PORT" ]; then
     if command -v shuf &>/dev/null; then
         NEW_SSH_PORT=$(shuf -i 20000-65000 -n 1)
@@ -43,16 +40,6 @@ fi
 
 SSHD_CONFIG="/etc/ssh/sshd_config"
 BACKUP_SUFFIX="-BACKUP-$(date +%Y%m%d%H%M%S)"
-
-# ---------- Запрос публичного ключа, если не передан ----------
-if [ -z "$PUBKEY" ]; then
-    echo "Вставь публичный SSH-ключ (одна строка, например из cat ~/.ssh/id_ed25519.pub):"
-    read -r PUBKEY
-fi
-if [ -z "$PUBKEY" ]; then
-    echo "Публичный ключ не введён. Выход."
-    exit 1
-fi
 
 echo "[*] Пользователь: $NEW_USER_NAME"
 echo "[*] Порт SSH: $NEW_SSH_PORT"
@@ -91,6 +78,14 @@ echo "[+] Sudo: группа sudousers"
 # ---------- SSH-ключ для нового пользователя ----------
 LAST_STEP="Шаг 4/7: SSH-ключ"
 echo ">>> $LAST_STEP"
+if [ -z "$PUBKEY" ]; then
+    echo "Вставь публичный SSH-ключ (одна строка, cat ~/.ssh/id_ed25519.pub):"
+    read -r PUBKEY
+fi
+if [ -z "$PUBKEY" ]; then
+    echo "Публичный ключ не введён. Выход."
+    exit 1
+fi
 USER_HOME="$(getent passwd "$NEW_USER_NAME" | cut -d: -f6)"
 USER_GROUP="$(id -gn "$NEW_USER_NAME" 2>/dev/null)" || USER_GROUP="sshusers"
 mkdir -p "${USER_HOME}/.ssh"
@@ -108,8 +103,8 @@ cp -a "$SSHD_CONFIG" "${SSHD_CONFIG}${BACKUP_SUFFIX}"
 set_sshd() {
     local key="$1"
     local value="$2"
-    if grep -qE "^#?\s*${key}\s+" "$SSHD_CONFIG"; then
-        sed -i -E "s|^#?\s*${key}\s+.*|${key} ${value}|" "$SSHD_CONFIG"
+    if grep -qE "^#?[[:space:]]*${key}[[:space:]]+" "$SSHD_CONFIG"; then
+        sed -i -E "s#^\\#?[[:space:]]*${key}[[:space:]]+.*#${key} ${value}#" "$SSHD_CONFIG"
     else
         echo "${key} ${value}" >> "$SSHD_CONFIG"
     fi
