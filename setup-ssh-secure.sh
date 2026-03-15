@@ -27,7 +27,7 @@ echo ">>> Если настраиваешь другой сервер — зай
 echo ""
 
 # ---------- Параметры ----------
-NEW_USER_NAME="${NEW_USER_NAME:-admin}"
+NEW_USER_NAME="${NEW_USER_NAME:-snegg000}"
 # Порт: без shuf (не везде есть) — fallback на $RANDOM
 if [ -z "$NEW_SSH_PORT" ]; then
     if command -v shuf &>/dev/null; then
