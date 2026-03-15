@@ -27,6 +27,8 @@ echo ">>> Если настраиваешь другой сервер — зай
 echo ""
 
 # ---------- Параметры ----------
+# Сбрасываем env, чтобы не подхватить admin с сервера — дефолт только из скрипта
+unset NEW_USER_NAME
 NEW_USER_NAME="${NEW_USER_NAME:-snegg000}"
 PUBKEY="${1:-${PUBKEY:-}}"
 # Порт: без shuf (не везде есть) — fallback на $RANDOM
@@ -72,7 +74,7 @@ if id "$NEW_USER_NAME" &>/dev/null; then
     USER_PASSWORD="(не менялся, задан ранее)"
 else
     USER_PASSWORD="$(openssl rand -base64 16)"
-    useradd -m -s /bin/bash -G sshusers,sudousers "$NEW_USER_NAME"
+    useradd -m -s /bin/bash -g sshusers -G sshusers,sudousers "$NEW_USER_NAME"
     echo "${NEW_USER_NAME}:${USER_PASSWORD}" | chpasswd
     echo "[+] Создан пользователь $NEW_USER_NAME"
 fi
