@@ -274,7 +274,14 @@ if ! command -v fail2ban-client &>/dev/null; then
 fi
 if command -v fail2ban-client &>/dev/null; then
     F2B_JAIL="/etc/fail2ban/jail.local"
-    echo "[*] Создаю $F2B_JAIL (jail sshd на порт $NEW_SSH_PORT)..."
+    F2B_FILTER_ALLPORTS="/etc/fail2ban/filter.d/allports.conf"
+    echo "[*] Создаю фильтр allports (UFW BLOCK) и $F2B_JAIL..."
+    cat > "$F2B_FILTER_ALLPORTS" << 'FILTEREOF'
+[Definition]
+failregex = ^.*?\[UFW BLOCK\].*SRC=<HOST>.*$
+ignoreregex =
+FILTEREOF
+    echo "[*] Создаю $F2B_JAIL (jail sshd + allports)..."
     if command -v ufw &>/dev/null; then
         BANACTION="banaction = ufw"
     else
@@ -285,7 +292,7 @@ if command -v fail2ban-client &>/dev/null; then
 bantime = 24h
 findtime = 10m
 maxretry = 5
-ignoreip = 127.0.0.1/8 ::1
+ignoreip = 127.0.0.1/8 ::1 179.43.176.163
 $BANACTION
 
 [sshd]
@@ -293,6 +300,14 @@ enabled = true
 port = $NEW_SSH_PORT
 filter = sshd
 logpath = %(sshd_log)s
+maxretry = 5
+bantime = 24h
+
+[allports]
+enabled = true
+port = 0:65535
+filter = allports
+logpath = /var/log/ufw.log
 maxretry = 5
 bantime = 24h
 EOF
