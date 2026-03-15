@@ -22,6 +22,7 @@ if ! command -v useradd &>/dev/null || ! command -v groupadd &>/dev/null; then
     exit 1
 fi
 
+echo ">>> v2 — chown по USER_GROUP (id -gn), не user:user"
 echo ">>> Хост: $(hostname). Запуск на этом сервере. Пользователь: root."
 echo ">>> Если настраиваешь другой сервер — зайди на него по SSH и запусти скрипт там."
 echo ""
@@ -91,11 +92,12 @@ echo "[+] Sudo: группа sudousers"
 LAST_STEP="Шаг 4/7: SSH-ключ"
 echo ">>> $LAST_STEP"
 USER_HOME="$(getent passwd "$NEW_USER_NAME" | cut -d: -f6)"
+USER_GROUP="$(id -gn "$NEW_USER_NAME" 2>/dev/null)" || USER_GROUP="sshusers"
 mkdir -p "${USER_HOME}/.ssh"
 echo "$PUBKEY" >> "${USER_HOME}/.ssh/authorized_keys"
 chmod 700 "${USER_HOME}/.ssh"
 chmod 600 "${USER_HOME}/.ssh/authorized_keys"
-chown -R "${NEW_USER_NAME}:$(id -gn "$NEW_USER_NAME")" "${USER_HOME}/.ssh"
+chown -R "${NEW_USER_NAME}:${USER_GROUP}" "${USER_HOME}/.ssh"
 echo "[+] Публичный ключ добавлен в ~/.ssh/authorized_keys"
 
 # ---------- Бэкап и настройка sshd ----------
