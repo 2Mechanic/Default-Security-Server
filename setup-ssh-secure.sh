@@ -95,7 +95,7 @@ mkdir -p "${USER_HOME}/.ssh"
 echo "$PUBKEY" >> "${USER_HOME}/.ssh/authorized_keys"
 chmod 700 "${USER_HOME}/.ssh"
 chmod 600 "${USER_HOME}/.ssh/authorized_keys"
-chown -R "${NEW_USER_NAME}:${NEW_USER_NAME}" "${USER_HOME}/.ssh"
+chown -R "${NEW_USER_NAME}:$(id -gn "$NEW_USER_NAME")" "${USER_HOME}/.ssh"
 echo "[+] Публичный ключ добавлен в ~/.ssh/authorized_keys"
 
 # ---------- Бэкап и настройка sshd ----------
