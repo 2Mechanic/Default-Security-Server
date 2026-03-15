@@ -27,9 +27,20 @@ echo ">>> Хост: $(hostname). Запуск на этом сервере. По
 echo ""
 
 # ---------- Параметры ----------
-echo "[*] Параметры: определяю пользователя и порт SSH..."
-unset NEW_USER_NAME
-NEW_USER_NAME="${NEW_USER_NAME:-snegg000}"
+echo "[*] Параметры..."
+echo ""
+printf "Введите желаемый логин [по умолчанию snegg000]: "
+read -r INPUT_USER
+NEW_USER_NAME="${INPUT_USER:-snegg000}"
+NEW_USER_NAME="${NEW_USER_NAME// /}"
+[ -z "$NEW_USER_NAME" ] && NEW_USER_NAME="snegg000"
+
+printf "Включать 2FA (OTP по коду из приложения)? (y/n) [y]: "
+read -r INPUT_2FA
+ENABLE_2FA="${INPUT_2FA:-y}"
+ENABLE_2FA="${ENABLE_2FA,,}"
+[ "$ENABLE_2FA" != "n" ] && [ "$ENABLE_2FA" != "no" ] && ENABLE_2FA="y" || ENABLE_2FA="n"
+
 PUBKEY="${1:-${PUBKEY:-}}"
 if [ -z "$NEW_SSH_PORT" ]; then
     if command -v shuf &>/dev/null; then
@@ -141,12 +152,20 @@ set_sshd "MaxAuthTries" "3"
 set_sshd "ClientAliveInterval" "120"
 set_sshd "ClientAliveCountMax" "2"
 
-echo "[*] Настраиваю sshd: 2FA (OTP)..."
-set_sshd "UsePAM" "yes"
-set_sshd "ChallengeResponseAuthentication" "yes"
-set_sshd "KbdInteractiveAuthentication" "yes"
-set_sshd "AuthenticationMethods" "publickey,keyboard-interactive:pam"
-echo "[+] sshd_config записан: порт $NEW_SSH_PORT, ключ + 2FA"
+if [ "$ENABLE_2FA" = "y" ]; then
+    echo "[*] Настраиваю sshd: 2FA (OTP)..."
+    set_sshd "UsePAM" "yes"
+    set_sshd "ChallengeResponseAuthentication" "yes"
+    set_sshd "KbdInteractiveAuthentication" "yes"
+    set_sshd "AuthenticationMethods" "publickey,keyboard-interactive:pam"
+    echo "[+] sshd_config: ключ + 2FA"
+else
+    echo "[*] Настраиваю sshd: вход только по ключу (без 2FA)..."
+    set_sshd "UsePAM" "yes"
+    set_sshd "AuthenticationMethods" "publickey"
+    echo "[+] sshd_config: только ключ"
+fi
+echo "[+] sshd_config записан, порт $NEW_SSH_PORT"
 
 # Проверка: порт реально записан в конфиг
 if grep -qE "^Port\s+${NEW_SSH_PORT}" "$SSHD_CONFIG"; then
@@ -156,33 +175,35 @@ else
     exit 1
 fi
 
-# ---------- Установка и настройка PAM для 2FA ----------
+# ---------- Установка и настройка PAM (2FA по желанию) ----------
 LAST_STEP="Шаг 6/8: PAM / 2FA"
 echo ">>> $LAST_STEP"
-if ! command -v google-authenticator &>/dev/null; then
-    echo "[*] Устанавливаю libpam-google-authenticator..."
-    if command -v apt-get &>/dev/null; then
-        apt-get update -qq && apt-get install -y -qq libpam-google-authenticator
-    elif command -v dnf &>/dev/null; then
-        dnf install -y libpam-google-authenticator
-    elif command -v yum &>/dev/null; then
-        yum install -y libpam-google-authenticator
-    else
-        echo "[!] Установи вручную: libpam-google-authenticator (apt/dnf/yum)"
-        exit 1
-    fi
-    echo "[+] Пакет установлен"
-fi
 PAM_SSHD="/etc/pam.d/sshd"
-if [ -f "$PAM_SSHD" ] && ! grep -q "pam_google_authenticator" "$PAM_SSHD"; then
-    echo "[*] Добавляю pam_google_authenticator в $PAM_SSHD..."
-    cp -a "$PAM_SSHD" "${PAM_SSHD}${BACKUP_SUFFIX}"
-    sed -i '1i auth       required     pam_google_authenticator.so nullok' "$PAM_SSHD"
-    echo "[+] PAM: 2FA включён"
+if [ "$ENABLE_2FA" = "y" ]; then
+    if ! command -v google-authenticator &>/dev/null; then
+        echo "[*] Устанавливаю libpam-google-authenticator..."
+        if command -v apt-get &>/dev/null; then
+            apt-get update -qq && apt-get install -y -qq libpam-google-authenticator
+        elif command -v dnf &>/dev/null; then
+            dnf install -y libpam-google-authenticator
+        elif command -v yum &>/dev/null; then
+            yum install -y libpam-google-authenticator
+        else
+            echo "[!] Установи вручную: libpam-google-authenticator (apt/dnf/yum)"
+            exit 1
+        fi
+        echo "[+] Пакет установлен"
+    fi
+    if [ -f "$PAM_SSHD" ] && ! grep -q "pam_google_authenticator" "$PAM_SSHD"; then
+        echo "[*] Добавляю pam_google_authenticator в $PAM_SSHD..."
+        cp -a "$PAM_SSHD" "${PAM_SSHD}${BACKUP_SUFFIX}"
+        sed -i '1i auth       required     pam_google_authenticator.so nullok' "$PAM_SSHD"
+        echo "[+] PAM: 2FA включён"
+    fi
 fi
 if [ -f "$PAM_SSHD" ] && grep -qE "^[^#]*@include.*common-auth" "$PAM_SSHD"; then
-    echo "[*] Отключаю запрос пароля при SSH (оставляю ключ + 2FA)..."
-    sed -i -E 's/^([^#]*@include.*common-auth)/# \1  # отключено: вход по ключу+2FA без пароля/' "$PAM_SSHD"
+    echo "[*] Отключаю запрос пароля при SSH (вход по ключу без пароля)..."
+    sed -i -E 's/^([^#]*@include.*common-auth)/# \1  # отключено: ключ без пароля/' "$PAM_SSHD"
     echo "[+] Пароль при входе по SSH отключён"
 fi
 echo "[+] PAM для sshd настроен"
@@ -319,17 +340,19 @@ else
     echo "[*] fail2ban не установлен; установи вручную и настрой jail для порта $NEW_SSH_PORT"
 fi
 
-# ---------- Настройка 2FA для пользователя (интерактивно: отсканируй QR в приложении) ----------
-echo ""
-echo "[*] Настройка 2FA для пользователя $NEW_USER_NAME..."
-echo "    Отсканируй QR в приложении (Google Authenticator и т.п.), на вопросы отвечай y."
-echo ""
-if sudo -u "$NEW_USER_NAME" google-authenticator -t -d -f -r 3 -R 30 -w 17 2>/dev/null; then
-    echo "[+] 2FA настроен."
-else
-    echo "[!] 2FA не настроился (нет терминала или ошибка). После первого входа по SSH выполни:"
-    echo "    sudo -u $NEW_USER_NAME google-authenticator"
-    echo "    Ответь y на все вопросы, отсканируй QR, затем перезапусти SSH: systemctl restart sshd"
+# ---------- Настройка 2FA для пользователя (если включено) ----------
+if [ "$ENABLE_2FA" = "y" ]; then
+    echo ""
+    echo "[*] Настройка 2FA для пользователя $NEW_USER_NAME..."
+    echo "    Отсканируй QR в приложении (Google Authenticator и т.п.), на вопросы отвечай y."
+    echo ""
+    if sudo -u "$NEW_USER_NAME" google-authenticator -t -d -f -r 3 -R 30 -w 17 2>/dev/null; then
+        echo "[+] 2FA настроен."
+    else
+        echo "[!] 2FA не настроился (нет терминала или ошибка). После первого входа по SSH выполни:"
+        echo "    sudo -u $NEW_USER_NAME google-authenticator"
+        echo "    Ответь y на все вопросы, отсканируй QR, затем перезапусти SSH: systemctl restart sshd"
+    fi
 fi
 
 # ---------- Перезапуск SSH ----------
@@ -355,7 +378,11 @@ echo ""
 echo "  Подключение:"
 echo "  ssh -p $NEW_SSH_PORT $NEW_USER_NAME@<IP_СЕРВЕРА>"
 echo ""
-echo "  Вход: ключ + код 2FA (OTP). Пароль нужен для sudo."
+if [ "$ENABLE_2FA" = "y" ]; then
+    echo "  Вход: ключ + код 2FA (OTP). Пароль нужен для sudo."
+else
+    echo "  Вход: только ключ. Пароль нужен для sudo."
+fi
 echo "=============================================="
 echo ""
 echo ">>> Всё готово. Изменения применены на этом хосте ($(hostname))."
