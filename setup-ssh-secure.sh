@@ -109,7 +109,7 @@ set_sshd() {
     local key="$1"
     local value="$2"
     if grep -qE "^#?\s*${key}\s+" "$SSHD_CONFIG"; then
-        sed -i -E "s/^#?\s*${key}\s+.*/${key} ${value}/" "$SSHD_CONFIG"
+        sed -i -E "s|^#?\s*${key}\s+.*|${key} ${value}|" "$SSHD_CONFIG"
     else
         echo "${key} ${value}" >> "$SSHD_CONFIG"
     fi
