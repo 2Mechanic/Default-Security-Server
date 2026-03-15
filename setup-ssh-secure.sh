@@ -224,20 +224,51 @@ else
     echo "[!] UFW не установился; открой порт $NEW_SSH_PORT вручную в фаерволе"
 fi
 
-# ---------- Fail2ban по гайду: установка, sshd jail, порт, bantime/findtime/maxretry ----------
+# ---------- Fail2ban по гайду: ожидание apt lock, установка, sshd jail ----------
 LAST_STEP="Шаг 8/8: fail2ban"
 echo ">>> $LAST_STEP"
 echo "[*] Настраиваю fail2ban (защита от перебора SSH)..."
-if ! command -v fail2ban-client &>/dev/null; then
-    echo "[*] Устанавливаю fail2ban..."
+
+wait_apt() {
+    local i=0
+    while true; do
+        if command -v fuser &>/dev/null; then
+            fuser -s /var/lib/dpkg/lock-frontend 2>/dev/null || fuser -s /var/lib/dpkg/lock 2>/dev/null || break
+        else
+            [ -f /var/lib/dpkg/lock-frontend ] || [ -f /var/lib/dpkg/lock ] || break
+        fi
+        [ $i -eq 0 ] && echo "[*] Ожидаю освобождения apt/dpkg (unattended-upgrades или другой процесс)..."
+        sleep 5
+        i=$((i + 1))
+        [ $i -ge 24 ] && { echo "[!] apt занят больше 2 мин, пропускаю установку fail2ban"; return 1; }
+    done
+    return 0
+}
+
+install_f2b() {
     if command -v apt-get &>/dev/null; then
-        apt-get update -qq && apt-get install -y fail2ban || { echo "[!] Не удалось установить fail2ban (apt)"; }
+        wait_apt || return 1
+        echo "[*] Обновляю список пакетов..."
+        apt-get update -qq || true
+        wait_apt || return 1
+        echo "[*] Устанавливаю пакет fail2ban (вывод ниже)..."
+        apt-get install -y fail2ban || return 1
     elif command -v dnf &>/dev/null; then
-        dnf install -y fail2ban || { echo "[!] Не удалось установить fail2ban (dnf)"; }
+        echo "[*] Устанавливаю fail2ban (dnf)..."
+        dnf install -y fail2ban || return 1
     elif command -v yum &>/dev/null; then
-        yum install -y fail2ban || { echo "[!] Не удалось установить fail2ban (yum)"; }
+        echo "[*] Устанавливаю fail2ban (yum)..."
+        yum install -y fail2ban || return 1
     else
         echo "[!] Нет apt/dnf/yum; установи fail2ban вручную"
+        return 1
+    fi
+}
+
+if ! command -v fail2ban-client &>/dev/null; then
+    if ! install_f2b; then
+        echo "[!] Установка fail2ban не удалась. После скрипта выполни вручную:"
+        echo "    sudo apt-get update && sudo apt-get install -y fail2ban"
     fi
 fi
 if command -v fail2ban-client &>/dev/null; then
