@@ -186,10 +186,20 @@ if [ -f "$PAM_SSHD" ] && grep -qE "^[^#]*@include.*common-auth" "$PAM_SSHD"; the
 fi
 echo "[+] PAM для sshd настроен"
 
-# ---------- UFW: как в гайде — default deny, allow outgoing, логирование, SSH ----------
+# ---------- UFW: установка (если нет), настройка, включение ----------
 LAST_STEP="Шаг 7/8: UFW"
 echo ">>> $LAST_STEP"
 echo "[*] Настраиваю UFW..."
+if ! command -v ufw &>/dev/null; then
+    echo "[*] Uстанавливаю UFW..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y ufw
+    elif command -v dnf &>/dev/null; then
+        dnf install -y ufw
+    elif command -v yum &>/dev/null; then
+        yum install -y ufw
+    fi
+fi
 if command -v ufw &>/dev/null; then
     echo "[*] UFW: задаю политики по умолчанию (deny incoming, allow outgoing)..."
     ufw default deny incoming
@@ -203,28 +213,31 @@ if command -v ufw &>/dev/null; then
     ufw allow "$NEW_SSH_PORT/tcp" comment "SSH"
     echo "[+] UFW: правило для порта $NEW_SSH_PORT добавлено"
     if ufw status 2>/dev/null | grep -q "Status: active"; then
-        echo "[+] UFW уже включён, правила применены"
+        echo "[+] UFW уже включён"
     else
-        echo "[!] UFW установлен, но выключен. Включи после проверки входа: ufw enable"
+        echo "[*] UFW: включаю фаервол (порт $NEW_SSH_PORT уже разрешён)..."
+        ufw --force enable
+        echo "[+] UFW включён"
     fi
     echo "[+] Настройка UFW завершена"
 else
-    echo "[*] UFW не установлен; открой порт $NEW_SSH_PORT вручную в своём фаерволе"
+    echo "[!] UFW не установился; открой порт $NEW_SSH_PORT вручную в фаерволе"
 fi
 
-# ---------- Fail2ban по гайду: sshd jail, порт, bantime/findtime/maxretry ----------
+# ---------- Fail2ban по гайду: установка, sshd jail, порт, bantime/findtime/maxretry ----------
 LAST_STEP="Шаг 8/8: fail2ban"
 echo ">>> $LAST_STEP"
 echo "[*] Настраиваю fail2ban (защита от перебора SSH)..."
 if ! command -v fail2ban-client &>/dev/null; then
+    echo "[*] Устанавливаю fail2ban..."
     if command -v apt-get &>/dev/null; then
-        apt-get update -qq && apt-get install -y -qq fail2ban
+        apt-get update -qq && apt-get install -y fail2ban || { echo "[!] Не удалось установить fail2ban (apt)"; }
     elif command -v dnf &>/dev/null; then
-        dnf install -y fail2ban
+        dnf install -y fail2ban || { echo "[!] Не удалось установить fail2ban (dnf)"; }
     elif command -v yum &>/dev/null; then
-        yum install -y fail2ban
+        yum install -y fail2ban || { echo "[!] Не удалось установить fail2ban (yum)"; }
     else
-        echo "[!] Установи вручную: fail2ban (apt/dnf/yum)"
+        echo "[!] Нет apt/dnf/yum; установи fail2ban вручную"
     fi
 fi
 if command -v fail2ban-client &>/dev/null; then
