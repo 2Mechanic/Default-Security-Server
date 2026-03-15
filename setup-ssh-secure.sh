@@ -22,11 +22,12 @@ if ! command -v useradd &>/dev/null || ! command -v groupadd &>/dev/null; then
     exit 1
 fi
 
-echo ">>> v3 — sed с #, ключ запрашивается после создания пользователя"
+echo ">>> v4 — поэтапный вывод, UFW и fail2ban по гайду"
 echo ">>> Хост: $(hostname). Запуск на этом сервере. Пользователь: root."
 echo ""
 
 # ---------- Параметры ----------
+echo "[*] Параметры: определяю пользователя и порт SSH..."
 unset NEW_USER_NAME
 NEW_USER_NAME="${NEW_USER_NAME:-snegg000}"
 PUBKEY="${1:-${PUBKEY:-}}"
@@ -41,51 +42,56 @@ fi
 SSHD_CONFIG="/etc/ssh/sshd_config"
 BACKUP_SUFFIX="-BACKUP-$(date +%Y%m%d%H%M%S)"
 
-echo "[*] Пользователь: $NEW_USER_NAME"
-echo "[*] Порт SSH: $NEW_SSH_PORT"
+echo "[+] Пользователь: $NEW_USER_NAME, порт SSH: $NEW_SSH_PORT"
 echo ""
 
 # ---------- Группы (как в гайде) ----------
-LAST_STEP="Шаг 1/7: группы"
+LAST_STEP="Шаг 1/8: группы"
+echo ""
 echo ">>> $LAST_STEP"
+echo "[*] Создаю группы sshusers и sudousers..."
 getent group sshusers >/dev/null 2>&1 || groupadd sshusers
 getent group sudousers >/dev/null 2>&1 || groupadd sudousers
 echo "[+] Группы sshusers, sudousers готовы"
 
 # ---------- Новый пользователь с паролем ----------
-LAST_STEP="Шаг 2/7: пользователь $NEW_USER_NAME"
+LAST_STEP="Шаг 2/8: пользователь $NEW_USER_NAME"
 echo ">>> $LAST_STEP"
 if id "$NEW_USER_NAME" &>/dev/null; then
-    echo "[*] Пользователь $NEW_USER_NAME уже есть, добавляю в группы"
+    echo "[*] Пользователь $NEW_USER_NAME уже есть, добавляю в группы..."
     usermod -aG sshusers "$NEW_USER_NAME"
     usermod -aG sudousers "$NEW_USER_NAME"
     USER_PASSWORD="(не менялся, задан ранее)"
+    echo "[+] Группы обновлены"
 else
+    echo "[*] Создаю пользователя $NEW_USER_NAME с случайным паролем..."
     USER_PASSWORD="$(openssl rand -base64 16)"
     useradd -m -s /bin/bash -g sshusers -G sshusers,sudousers "$NEW_USER_NAME"
     echo "${NEW_USER_NAME}:${USER_PASSWORD}" | chpasswd
-    echo "[+] Создан пользователь $NEW_USER_NAME"
+    echo "[+] Пользователь создан, пароль установлен"
 fi
 
 # ---------- Sudo для sudousers ----------
-LAST_STEP="Шаг 3/7: sudo"
+LAST_STEP="Шаг 3/8: sudo"
 echo ">>> $LAST_STEP"
+echo "[*] Настраиваю sudo для группы sudousers..."
 SUDOERS_FILE="/etc/sudoers.d/99-sudousers"
 echo "%sudousers   ALL=(ALL:ALL) ALL" > "$SUDOERS_FILE"
 chmod 440 "$SUDOERS_FILE"
-echo "[+] Sudo: группа sudousers"
+echo "[+] Файл $SUDOERS_FILE создан"
 
 # ---------- SSH-ключ для нового пользователя ----------
-LAST_STEP="Шаг 4/7: SSH-ключ"
+LAST_STEP="Шаг 4/8: SSH-ключ"
 echo ">>> $LAST_STEP"
 if [ -z "$PUBKEY" ]; then
-    echo "Вставь публичный SSH-ключ (одна строка, cat ~/.ssh/id_ed25519.pub):"
+    echo "[*] Вставь публичный SSH-ключ (одна строка, cat ~/.ssh/id_ed25519.pub):"
     read -r PUBKEY
 fi
 if [ -z "$PUBKEY" ]; then
     echo "Публичный ключ не введён. Выход."
     exit 1
 fi
+echo "[*] Добавляю ключ в authorized_keys пользователя $NEW_USER_NAME..."
 USER_HOME="$(getent passwd "$NEW_USER_NAME" | cut -d: -f6)"
 USER_GROUP="$(id -gn "$NEW_USER_NAME" 2>/dev/null)" || USER_GROUP="sshusers"
 mkdir -p "${USER_HOME}/.ssh"
@@ -93,11 +99,12 @@ echo "$PUBKEY" >> "${USER_HOME}/.ssh/authorized_keys"
 chmod 700 "${USER_HOME}/.ssh"
 chmod 600 "${USER_HOME}/.ssh/authorized_keys"
 chown -R "${NEW_USER_NAME}:${USER_GROUP}" "${USER_HOME}/.ssh"
-echo "[+] Публичный ключ добавлен в ~/.ssh/authorized_keys"
+echo "[+] Ключ записан в ${USER_HOME}/.ssh/authorized_keys"
 
 # ---------- Бэкап и настройка sshd ----------
-LAST_STEP="Шаг 5/7: sshd_config"
+LAST_STEP="Шаг 5/8: sshd_config"
 echo ">>> $LAST_STEP"
+echo "[*] Бэкап конфига: ${SSHD_CONFIG}${BACKUP_SUFFIX}"
 cp -a "$SSHD_CONFIG" "${SSHD_CONFIG}${BACKUP_SUFFIX}"
 
 set_sshd() {
@@ -110,14 +117,14 @@ set_sshd() {
     fi
 }
 
-# Порт и только пользователи из sshusers
+echo "[*] Настраиваю sshd: порт, группы, аутентификация..."
 set_sshd "Port" "$NEW_SSH_PORT"
 set_sshd "AllowGroups" "sshusers"
 set_sshd "PermitRootLogin" "no"
 set_sshd "PasswordAuthentication" "no"
 set_sshd "PubkeyAuthentication" "yes"
 
-# Алгоритмы (Mozilla)
+echo "[*] Настраиваю sshd: алгоритмы (Mozilla)..."
 set_sshd "HostKey" "/etc/ssh/ssh_host_ed25519_key"
 set_sshd "HostKey" "/etc/ssh/ssh_host_rsa_key"
 set_sshd "KexAlgorithms" "curve25519-sha256@libssh.org,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256"
@@ -125,6 +132,7 @@ set_sshd "Ciphers" "chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-
 set_sshd "MACs" "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256"
 set_sshd "LogLevel" "VERBOSE"
 
+echo "[*] Настраиваю sshd: ограничения сессии..."
 set_sshd "X11Forwarding" "no"
 set_sshd "AllowTcpForwarding" "no"
 set_sshd "PermitEmptyPasswords" "no"
@@ -132,12 +140,12 @@ set_sshd "MaxAuthTries" "3"
 set_sshd "ClientAliveInterval" "120"
 set_sshd "ClientAliveCountMax" "2"
 
-# ---------- 2FA (OTP): ключ сначала, потом запрос кода ----------
+echo "[*] Настраиваю sshd: 2FA (OTP)..."
 set_sshd "UsePAM" "yes"
 set_sshd "ChallengeResponseAuthentication" "yes"
 set_sshd "KbdInteractiveAuthentication" "yes"
 set_sshd "AuthenticationMethods" "publickey,keyboard-interactive:pam"
-echo "[+] sshd: 2FA (OTP) включён в настройках"
+echo "[+] sshd_config записан: порт $NEW_SSH_PORT, ключ + 2FA"
 
 # Проверка: порт реально записан в конфиг
 if grep -qE "^Port\s+${NEW_SSH_PORT}" "$SSHD_CONFIG"; then
@@ -148,9 +156,10 @@ else
 fi
 
 # ---------- Установка и настройка PAM для 2FA ----------
-LAST_STEP="Шаг 6/7: PAM / 2FA"
+LAST_STEP="Шаг 6/8: PAM / 2FA"
 echo ">>> $LAST_STEP"
 if ! command -v google-authenticator &>/dev/null; then
+    echo "[*] Устанавливаю libpam-google-authenticator..."
     if command -v apt-get &>/dev/null; then
         apt-get update -qq && apt-get install -y -qq libpam-google-authenticator
     elif command -v dnf &>/dev/null; then
@@ -161,48 +170,98 @@ if ! command -v google-authenticator &>/dev/null; then
         echo "[!] Установи вручную: libpam-google-authenticator (apt/dnf/yum)"
         exit 1
     fi
+    echo "[+] Пакет установлен"
 fi
 PAM_SSHD="/etc/pam.d/sshd"
 if [ -f "$PAM_SSHD" ] && ! grep -q "pam_google_authenticator" "$PAM_SSHD"; then
+    echo "[*] Добавляю pam_google_authenticator в $PAM_SSHD..."
     cp -a "$PAM_SSHD" "${PAM_SSHD}${BACKUP_SUFFIX}"
     sed -i '1i auth       required     pam_google_authenticator.so nullok' "$PAM_SSHD"
-    echo "[+] PAM: добавлен pam_google_authenticator (2FA)"
+    echo "[+] PAM: 2FA включён"
 fi
-# Убираем запрос пароля при SSH — только ключ + OTP. Пароль всё ещё нужен для sudo.
 if [ -f "$PAM_SSHD" ] && grep -qE "^[^#]*@include.*common-auth" "$PAM_SSHD"; then
+    echo "[*] Отключаю запрос пароля при SSH (оставляю ключ + 2FA)..."
     sed -i -E 's/^([^#]*@include.*common-auth)/# \1  # отключено: вход по ключу+2FA без пароля/' "$PAM_SSHD"
-    echo "[+] PAM: отключён запрос пароля при SSH (оставлены ключ + 2FA)"
+    echo "[+] Пароль при входе по SSH отключён"
 fi
-if [ -f "$PAM_SSHD" ]; then
-    grep -q "pam_google_authenticator" "$PAM_SSHD" && echo "[+] Проверка: строка pam_google_authenticator есть в $PAM_SSHD"
-fi
-
-echo "[+] sshd настроен: ключ + 2FA, root выключен, порт $NEW_SSH_PORT"
+echo "[+] PAM для sshd настроен"
 
 # ---------- UFW: как в гайде — default deny, allow outgoing, логирование, SSH ----------
-LAST_STEP="Шаг 7/7: UFW"
+LAST_STEP="Шаг 7/8: UFW"
 echo ">>> $LAST_STEP"
+echo "[*] Настраиваю UFW..."
 if command -v ufw &>/dev/null; then
+    echo "[*] UFW: задаю политики по умолчанию (deny incoming, allow outgoing)..."
     ufw default deny incoming
     ufw default allow outgoing
-    echo "[+] UFW: default deny incoming, allow outgoing"
+    echo "[+] UFW: политики заданы"
+    echo "[*] UFW: включаю логирование (уровень high)..."
     ufw logging on
     ufw logging high
-    echo "[+] UFW: логирование включено (high), логи: /var/log/ufw.log"
+    echo "[+] UFW: логи в /var/log/ufw.log"
+    echo "[*] UFW: разрешаю порт $NEW_SSH_PORT/tcp для SSH..."
     ufw allow "$NEW_SSH_PORT/tcp" comment "SSH"
-    echo "[+] UFW: добавлено правило — порт $NEW_SSH_PORT/tcp"
+    echo "[+] UFW: правило для порта $NEW_SSH_PORT добавлено"
     if ufw status 2>/dev/null | grep -q "Status: active"; then
-        echo "[+] UFW уже включён, правила применились"
+        echo "[+] UFW уже включён, правила применены"
     else
         echo "[!] UFW установлен, но выключен. Включи после проверки входа: ufw enable"
     fi
+    echo "[+] Настройка UFW завершена"
 else
-    echo "[*] UFW не установлен; если пользуешься фаерволом — открой порт $NEW_SSH_PORT вручную"
+    echo "[*] UFW не установлен; открой порт $NEW_SSH_PORT вручную в своём фаерволе"
+fi
+
+# ---------- Fail2ban по гайду: sshd jail, порт, bantime/findtime/maxretry ----------
+LAST_STEP="Шаг 8/8: fail2ban"
+echo ">>> $LAST_STEP"
+echo "[*] Настраиваю fail2ban (защита от перебора SSH)..."
+if ! command -v fail2ban-client &>/dev/null; then
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq fail2ban
+    elif command -v dnf &>/dev/null; then
+        dnf install -y fail2ban
+    elif command -v yum &>/dev/null; then
+        yum install -y fail2ban
+    else
+        echo "[!] Установи вручную: fail2ban (apt/dnf/yum)"
+    fi
+fi
+if command -v fail2ban-client &>/dev/null; then
+    F2B_JAIL="/etc/fail2ban/jail.local"
+    echo "[*] Создаю $F2B_JAIL (jail sshd на порт $NEW_SSH_PORT)..."
+    if command -v ufw &>/dev/null; then
+        BANACTION="banaction = ufw"
+    else
+        BANACTION=""
+    fi
+    cat > "$F2B_JAIL" << EOF
+[DEFAULT]
+bantime = 24h
+findtime = 10m
+maxretry = 5
+ignoreip = 127.0.0.1/8 ::1
+$BANACTION
+
+[sshd]
+enabled = true
+port = $NEW_SSH_PORT
+filter = sshd
+logpath = %(sshd_log)s
+maxretry = 5
+bantime = 24h
+EOF
+    echo "[+] Конфиг записан: bantime 24h, findtime 10m, maxretry 5"
+    systemctl enable fail2ban 2>/dev/null || true
+    systemctl restart fail2ban 2>/dev/null || true
+    echo "[+] fail2ban включён и перезапущен"
+else
+    echo "[*] fail2ban не установлен; установи вручную и настрой jail для порта $NEW_SSH_PORT"
 fi
 
 # ---------- Настройка 2FA для пользователя (интерактивно: отсканируй QR в приложении) ----------
 echo ""
-echo "[*] Настройка 2FA для пользователя $NEW_USER_NAME."
+echo "[*] Настройка 2FA для пользователя $NEW_USER_NAME..."
 echo "    Отсканируй QR в приложении (Google Authenticator и т.п.), на вопросы отвечай y."
 echo ""
 if sudo -u "$NEW_USER_NAME" google-authenticator -t -d -f -r 3 -R 30 -w 17 2>/dev/null; then
@@ -214,10 +273,11 @@ else
 fi
 
 # ---------- Перезапуск SSH ----------
+echo "[*] Перезапускаю службу SSH..."
 if systemctl restart sshd 2>/dev/null; then
-    echo "[+] SSH перезапущен (sshd)"
+    echo "[+] Служба sshd перезапущена"
 elif systemctl restart ssh 2>/dev/null; then
-    echo "[+] SSH перезапущен (ssh)"
+    echo "[+] Служба ssh перезапущена"
 else
     echo "[!] Не удалось перезапустить SSH (sshd/ssh). Выполни вручную: systemctl restart sshd или systemctl restart ssh"
     exit 1
