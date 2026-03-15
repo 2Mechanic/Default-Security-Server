@@ -58,11 +58,12 @@ echo "[+] Группы sshusers, sudousers готовы"
 LAST_STEP="Шаг 2/8: пользователь $NEW_USER_NAME"
 echo ">>> $LAST_STEP"
 if id "$NEW_USER_NAME" &>/dev/null; then
-    echo "[*] Пользователь $NEW_USER_NAME уже есть, добавляю в группы..."
+    echo "[*] Пользователь $NEW_USER_NAME уже есть, добавляю в группы и задаю новый пароль..."
     usermod -aG sshusers "$NEW_USER_NAME"
     usermod -aG sudousers "$NEW_USER_NAME"
-    USER_PASSWORD="(не менялся, задан ранее)"
-    echo "[+] Группы обновлены"
+    USER_PASSWORD="$(openssl rand -base64 16)"
+    echo "${NEW_USER_NAME}:${USER_PASSWORD}" | chpasswd
+    echo "[+] Группы обновлены, пароль сменён (новый — в конце вывода)"
 else
     echo "[*] Создаю пользователя $NEW_USER_NAME с случайным паролем..."
     USER_PASSWORD="$(openssl rand -base64 16)"
