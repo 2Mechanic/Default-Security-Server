@@ -29,20 +29,32 @@ echo ""
 # ---------- Параметры ----------
 echo "[*] Параметры..."
 echo ""
+# Ввод с /dev/tty — работает и при curl | bash (stdin занят pipe)
+ask() {
+    # $1 = имя переменной
+    local _v
+    if [ -r /dev/tty ]; then
+        read -r _v </dev/tty || _v=""
+    else
+        read -r _v || _v=""
+    fi
+    printf -v "$1" '%s' "$_v"
+}
+
 printf "Введите желаемый логин [по умолчанию snegg000]: "
-read -r INPUT_USER
+ask INPUT_USER
 NEW_USER_NAME="${INPUT_USER:-snegg000}"
 NEW_USER_NAME="${NEW_USER_NAME// /}"
 [ -z "$NEW_USER_NAME" ] && NEW_USER_NAME="snegg000"
 
 printf "Включать 2FA (OTP по коду из приложения)? (y/n) [y]: "
-read -r INPUT_2FA
+ask INPUT_2FA
 ENABLE_2FA="${INPUT_2FA:-y}"
 ENABLE_2FA="${ENABLE_2FA,,}"
 [ "$ENABLE_2FA" != "n" ] && [ "$ENABLE_2FA" != "no" ] && ENABLE_2FA="y" || ENABLE_2FA="n"
 
 printf "Устанавливать NetBird? (y/n) [n]: "
-read -r INPUT_NETBIRD
+ask INPUT_NETBIRD
 ENABLE_NETBIRD="${INPUT_NETBIRD:-n}"
 ENABLE_NETBIRD="${ENABLE_NETBIRD,,}"
 [ "$ENABLE_NETBIRD" = "y" ] || [ "$ENABLE_NETBIRD" = "yes" ] && ENABLE_NETBIRD="y" || ENABLE_NETBIRD="n"
@@ -50,7 +62,7 @@ ENABLE_NETBIRD="${ENABLE_NETBIRD,,}"
 NETBIRD_SETUP_KEY=""
 if [ "$ENABLE_NETBIRD" = "y" ]; then
     printf "Setup key NetBird (Enter — только установить, без netbird up): "
-    read -r NETBIRD_SETUP_KEY
+    ask NETBIRD_SETUP_KEY
     NETBIRD_SETUP_KEY="${NETBIRD_SETUP_KEY// /}"
 fi
 
@@ -110,7 +122,7 @@ LAST_STEP="Шаг 4/9: SSH-ключ"
 echo ">>> $LAST_STEP"
 if [ -z "$PUBKEY" ]; then
     echo "[*] Вставь публичный SSH-ключ (одна строка, cat ~/.ssh/id_ed25519.pub):"
-    read -r PUBKEY
+    ask PUBKEY
 fi
 if [ -z "$PUBKEY" ]; then
     echo "Публичный ключ не введён. Выход."
@@ -363,7 +375,7 @@ FILTEREOF
 
     echo ""
     printf "Доп. IP для ignoreip (через пробел, Enter — пропустить): "
-    read -r INPUT_IGNOREIP
+    ask INPUT_IGNOREIP
     INPUT_IGNOREIP=$(echo "$INPUT_IGNOREIP" | xargs 2>/dev/null || echo "$INPUT_IGNOREIP" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
     if [ -n "$INPUT_IGNOREIP" ]; then
         IGNOREIP="$IGNOREIP_BASE $INPUT_IGNOREIP"
