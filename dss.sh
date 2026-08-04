@@ -1,18 +1,70 @@
 #!/bin/bash
 # =============================================================================
 # Готовый скрипт по гайду How-To-Secure-A-Linux-Server.
-# Запуск ТОЛЬКО на целевом Linux-сервере: ssh user@сервер → там: sudo bash setup-ssh-secure.sh
-# Если падает с "command not found" — на сервере выполни: sed -i 's/\r$//' setup-ssh-secure.sh
+# Запуск ТОЛЬКО на целевом Linux-сервере: sudo bash dss.sh
+# Если падает с "command not found" — на сервере выполни: sed -i 's/\r$//' dss.sh
 # =============================================================================
+
+# curl|sudo bash: stdin = pipe, ввод с клавиатуры не работает.
+# Копируем скрипт во временный файл и перезапускаем с stdin/stdout на /dev/tty.
+if [ -z "${DSS_REEXEC:-}" ]; then
+    _bss="${BASH_SOURCE[0]:-}"
+    _need_reexec=0
+    if [ ! -f "$_bss" ]; then
+        _need_reexec=1
+    elif [ ! -t 0 ]; then
+        _need_reexec=1
+    fi
+    if [ "$_need_reexec" = 1 ]; then
+        _tmp="$(mktemp /tmp/dss.XXXXXX.sh)"
+        _copied=0
+        if [ -f "$_bss" ]; then
+            cp "$_bss" "$_tmp" && _copied=1
+        else
+            for _fd in 255 254 253 63 62 61; do
+                if [ -r "/proc/self/fd/$_fd" ] && cat "/proc/self/fd/$_fd" > "$_tmp" 2>/dev/null; then
+                    if [ -s "$_tmp" ] && grep -q "How-To-Secure-A-Linux-Server" "$_tmp" 2>/dev/null; then
+                        _copied=1
+                        break
+                    fi
+                fi
+            done
+            # pipe (curl|bash): скачиваем скрипт ещё раз в файл и перезапускаем с TTY
+            if [ "$_copied" != 1 ]; then
+                _url="${DSS_SCRIPT_URL:-https://raw.githubusercontent.com/2Mechanic/Default-Security-Server/main/dss.sh}"
+                if command -v curl >/dev/null 2>&1 && curl -fsSL "$_url" -o "$_tmp"; then
+                    if [ -s "$_tmp" ] && grep -q "How-To-Secure-A-Linux-Server" "$_tmp" 2>/dev/null; then
+                        _copied=1
+                    fi
+                fi
+            fi
+        fi
+        if [ "$_copied" != 1 ]; then
+            rm -f "$_tmp"
+            echo "[!] Не удалось подготовить интерактивный запуск через pipe."
+            echo "    Сделай так:"
+            echo "    curl -fsSL <URL> -o /tmp/dss.sh && sudo bash /tmp/dss.sh"
+            exit 1
+        fi
+        chmod 700 "$_tmp"
+        export DSS_REEXEC=1
+        echo "[*] Перезапуск с TTY для интерактивного ввода..."
+        if [ -c /dev/tty ]; then
+            exec bash "$_tmp" "$@" </dev/tty >/dev/tty 2>/dev/tty
+        else
+            exec bash "$_tmp" "$@"
+        fi
+    fi
+fi
 
 set -e
 [ -n "$DEBUG" ] && set -x
 LAST_STEP=""
-trap 'echo ""; echo "[!] Скрипт упал. Последний шаг: $LAST_STEP"; echo "    Запусти с отладкой: DEBUG=1 sudo bash setup-ssh-secure.sh"; exit 1' ERR
+trap 'echo ""; echo "[!] Скрипт упал. Последний шаг: $LAST_STEP"; echo "    Запусти с отладкой: DEBUG=1 sudo bash dss.sh"; exit 1' ERR
 
 # ---------- Обязательно root ----------
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Ошибка: запускай с root. Пример: sudo bash setup-ssh-secure.sh"
+    echo "Ошибка: запускай с root. Пример: sudo bash dss.sh"
     exit 1
 fi
 
@@ -29,14 +81,16 @@ echo ""
 # ---------- Параметры ----------
 echo "[*] Параметры..."
 echo ""
-# Ввод с /dev/tty — работает и при curl | bash (stdin занят pipe)
+# Всегда читаем с TTY (и после re-exec, и на всякий случай)
 ask() {
-    # $1 = имя переменной
-    local _v
-    if [ -r /dev/tty ]; then
+    local _v=""
+    if [ -c /dev/tty ] && [ -r /dev/tty ]; then
         read -r _v </dev/tty || _v=""
-    else
+    elif [ -t 0 ]; then
         read -r _v || _v=""
+    else
+        echo "[!] Нет TTY для ввода. Запусти: sudo bash dss.sh (не через pipe)."
+        exit 1
     fi
     printf -v "$1" '%s' "$_v"
 }
