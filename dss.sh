@@ -3,6 +3,16 @@
 # Готовый скрипт по гайду How-To-Secure-A-Linux-Server.
 # Запуск ТОЛЬКО на целевом Linux-сервере: sudo bash dss.sh
 # Если падает с "command not found" — на сервере выполни: sed -i 's/\r$//' dss.sh
+# v6.3:
+#   - NetBird: в фаерволе дополнительно открываются 80/tcp (HTTP),
+#     443/tcp (HTTPS), 3478/udp (NetBird STUN) + проверка правил
+# v6.2:
+#   - 2FA: до 3 попыток, проверка кода через oathtool, после успеха nullok
+#     убирается (2FA обязательна); громкое предупреждение, если не настроена
+#   - 2FA настраивается ДО NetBird (QR не теряется в выводе установщика)
+#   - NetBird: вывод установщика в лог, "Init already exists" не считается
+#     ошибкой, проверка службы
+#   - проверка синхронизации времени (иначе OTP-коды неверные)
 # v6.1:
 #   - смена пароля root (генерируется вместе с паролем пользователя)
 #   - логин/пароли выводятся даже при падении скрипта
@@ -14,7 +24,7 @@
 #   - пароль без openssl (fallback /dev/urandom) + проверка длины
 #   - wait_apt без fuser (pgrep + DPkg::Lock::Timeout)
 #   - SELinux: semanage port для нового порта
-#   - PAM: pam_permit после nullok (иначе вход без настроенного 2FA ломался)
+#   - PAM: pam_permit после google_authenticator
 #   - fail2ban: journal-backend без rsyslog, проверка конфига
 #   - финальная проверка входа с возможностью отката
 # =============================================================================
@@ -76,7 +86,7 @@ set -e
 # =============================================================================
 # Глобальные переменные
 # =============================================================================
-SCRIPT_VERSION="v6.1"
+SCRIPT_VERSION="v6.3"
 LAST_STEP="Подготовка"
 TS="$(date +%Y%m%d%H%M%S)"
 BACKUP_DIR="/root/dss-backup-$TS"
@@ -88,8 +98,19 @@ SUDOERS_FILE="/etc/sudoers.d/99-sudousers"
 NEW_USER_NAME=""
 USER_PASSWORD=""
 ROOT_PASSWORD=""
+USER_HOME=""
 NEW_SSH_PORT="${NEW_SSH_PORT:-}"
 CREDS_SHOWN=0          # итоговые данные уже выведены
+TFA_OK=0               # 2FA реально настроена и проверена
+
+# Порты для NetBird: "порт/протокол:комментарий"
+NETBIRD_PORTS=(
+    "51820/udp:NetBird"
+    "80/tcp:HTTP"
+    "443/tcp:HTTPS"
+    "3478/udp:NetBird STUN"
+)
+NETBIRD_PORTS_LIST="51820/udp, 80/tcp, 443/tcp, 3478/udp"
 
 SSH_CHANGED=0          # конфиги SSH/PAM уже изменены
 SSH_RESTARTED=0        # была попытка перезапуска sshd
@@ -436,7 +457,7 @@ for _s in ssh.socket sshd.socket; do
     fi
 done
 
-echo ">>> $SCRIPT_VERSION — sshd -t, автооткат, ssh.socket, смена пароля root"
+echo ">>> $SCRIPT_VERSION — sshd -t, автооткат, ssh.socket, смена пароля root, обязательная 2FA"
 echo ">>> Хост: $(hostname). Служба SSH: $SSH_SERVICE${SOCKET_UNIT:+ (через $SOCKET_UNIT)}"
 echo ""
 
@@ -507,13 +528,16 @@ else
 fi
 
 echo "[+] Пользователь: $NEW_USER_NAME, порт SSH: $NEW_SSH_PORT, 2FA: $ENABLE_2FA, NetBird: $ENABLE_NETBIRD"
+if [ "$ENABLE_NETBIRD" = "y" ]; then
+    echo "[+] Для NetBird будут открыты: $NETBIRD_PORTS_LIST"
+fi
 echo "[+] Пароль root будет заменён на случайный"
 echo ""
 
 # =============================================================================
 # Шаг 0: пакеты и данные о текущей сессии (до любых изменений)
 # =============================================================================
-LAST_STEP="Шаг 0/10: проверки и пакеты"
+LAST_STEP="Шаг 0/11: проверки и пакеты"
 echo ">>> $LAST_STEP"
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
@@ -548,6 +572,24 @@ if [ "$ENABLE_2FA" = "y" ]; then
         exit 1
     fi
     echo "[+] google-authenticator и PAM-модуль есть"
+    if ! command -v oathtool &>/dev/null; then
+        echo "[*] Устанавливаю oathtool (проверка OTP-кода)..."
+        pkg_install oathtool >/dev/null 2>&1 || true
+    fi
+    if command -v oathtool &>/dev/null; then
+        echo "[+] oathtool есть"
+    else
+        echo "[!] oathtool не установился — код 2FA не будет проверяться перед включением"
+    fi
+    # Время должно быть синхронизировано, иначе коды OTP будут неверными
+    if command -v timedatectl &>/dev/null; then
+        timedatectl set-ntp true >/dev/null 2>&1 || true
+        if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -qi yes; then
+            echo "[+] Время синхронизировано (NTP)"
+        else
+            echo "[!] Время НЕ синхронизировано (timedatectl). Коды 2FA могут не подходить."
+        fi
+    fi
 fi
 
 # Хост-ключи (создаст недостающие)
@@ -579,7 +621,7 @@ echo "[+] Текущий порт(ы) SSH: $OLD_SSH_PORTS${CLIENT_IP:+, твой
 # =============================================================================
 # Шаг 1: группы
 # =============================================================================
-LAST_STEP="Шаг 1/10: группы"
+LAST_STEP="Шаг 1/11: группы"
 echo ""
 echo ">>> $LAST_STEP"
 getent group sshusers >/dev/null 2>&1 || groupadd sshusers
@@ -589,10 +631,9 @@ echo "[+] Группы sshusers, sudousers готовы"
 # =============================================================================
 # Шаг 2: пользователь + пароль root
 # =============================================================================
-LAST_STEP="Шаг 2/10: пользователь $NEW_USER_NAME и пароль root"
+LAST_STEP="Шаг 2/11: пользователь $NEW_USER_NAME и пароль root"
 echo ">>> $LAST_STEP"
 
-# Генерация обоих паролей
 _up="$(gen_password)"
 _rp="$(gen_password)"
 _tries=0
@@ -605,7 +646,6 @@ if [ "${#_up}" -ne 16 ] || [ "${#_rp}" -ne 16 ] || [ "$_rp" = "$_up" ]; then
     exit 1
 fi
 
-# Пароль нового пользователя
 if id "$NEW_USER_NAME" &>/dev/null; then
     echo "[*] Пользователь $NEW_USER_NAME уже есть, добавляю в группы и задаю новый пароль..."
     usermod -aG sshusers,sudousers "$NEW_USER_NAME"
@@ -620,14 +660,11 @@ else
     echo "[+] Пользователь создан, пароль установлен"
 fi
 
-# Пароль root
 echo "[*] Меняю пароль root..."
 cp -a /etc/shadow "$BACKUP_DIR/shadow.orig"
 chmod 600 "$BACKUP_DIR/shadow.orig"
 echo "root:${_rp}" | chpasswd
 ROOT_PASSWORD="$_rp"
-# Если пароль root был заблокирован (облачные образы) — chpasswd задаёт новый хеш;
-# на всякий случай снимаем блокировку, чтобы работала консоль провайдера / su
 passwd -u root >/dev/null 2>&1 || true
 _rs="$(passwd -S root 2>/dev/null | awk '{print $2}' || true)"
 case "$_rs" in
@@ -640,7 +677,7 @@ echo "    Старый /etc/shadow сохранён в $BACKUP_DIR/shadow.orig"
 # =============================================================================
 # Шаг 3: sudo
 # =============================================================================
-LAST_STEP="Шаг 3/10: sudo"
+LAST_STEP="Шаг 3/11: sudo"
 echo ">>> $LAST_STEP"
 mkdir -p /etc/sudoers.d
 chmod 750 /etc/sudoers.d
@@ -672,7 +709,7 @@ fi
 # =============================================================================
 # Шаг 4: SSH-ключ
 # =============================================================================
-LAST_STEP="Шаг 4/10: SSH-ключ"
+LAST_STEP="Шаг 4/11: SSH-ключ"
 echo ">>> $LAST_STEP"
 if [ -z "$PUBKEY" ]; then
     echo "[*] Вставь публичный SSH-ключ (одна строка, cat ~/.ssh/id_ed25519.pub):"
@@ -710,7 +747,7 @@ chown -R "${NEW_USER_NAME}:${USER_GROUP}" "${USER_HOME}/.ssh"
 # =============================================================================
 # Шаг 5: sshd_config
 # =============================================================================
-LAST_STEP="Шаг 5/10: sshd_config"
+LAST_STEP="Шаг 5/11: sshd_config"
 echo ">>> $LAST_STEP"
 backup_file "$SSHD_CONFIG"
 SSH_CHANGED=1
@@ -804,18 +841,24 @@ if [ "$_eff_ports" != "$NEW_SSH_PORT" ]; then
     echo "[!] Эффективный порт(ы) sshd: '$_eff_ports', ожидался '$NEW_SSH_PORT'. Откат."
     exit 1
 fi
-for _pair in "passwordauthentication no" "permitrootlogin no" "pubkeyauthentication yes"; do
+_checks="passwordauthentication no|permitrootlogin no|pubkeyauthentication yes"
+if [ "$ENABLE_2FA" = "y" ]; then
+    _checks="$_checks|kbdinteractiveauthentication yes|authenticationmethods publickey,keyboard-interactive:pam"
+fi
+IFS='|' read -ra _pairs <<< "$_checks"
+for _pair in "${_pairs[@]}"; do
     if ! printf '%s\n' "$_eff" | grep -qix "$_pair"; then
         echo "[!] Эффективное значение не '$_pair' (что-то перекрывает настройки). Откат."
         exit 1
     fi
 done
 echo "[+] Эффективный конфиг: Port $NEW_SSH_PORT, пароли и root запрещены"
+if [ "$ENABLE_2FA" = "y" ]; then echo "[+] Эффективный конфиг: требуется ключ + keyboard-interactive (OTP)"; fi
 
 # =============================================================================
 # Шаг 6: PAM / 2FA
 # =============================================================================
-LAST_STEP="Шаг 6/10: PAM / 2FA"
+LAST_STEP="Шаг 6/11: PAM / 2FA"
 echo ">>> $LAST_STEP"
 if [ "$ENABLE_2FA" = "y" ]; then
     if [ ! -f "$PAM_SSHD" ]; then
@@ -844,15 +887,15 @@ if [ "$ENABLE_2FA" = "y" ]; then
         sed -i -E 's/^([[:space:]]*auth[[:space:]]+substack[[:space:]]+password-auth.*)$/# DSS-disabled: \1/' "$PAM_SSHD"
         echo "[+] auth substack password-auth отключён"
     fi
-    echo "[+] PAM: ключ + OTP (nullok + pam_permit: без настроенного OTP вход только по ключу)"
+    echo "[+] PAM: ключ + OTP (временно nullok — уберётся после настройки 2FA на шаге 10)"
 else
-    echo "[+] 2FA выключена — PAM не трогаю (вход только по ключу, PAM-auth не используется)"
+    echo "[+] 2FA выключена — PAM не трогаю (вход только по ключу)"
 fi
 
 # =============================================================================
 # Шаг 7: применение SSH (SELinux, ssh.socket, перезапуск, проверка порта)
 # =============================================================================
-LAST_STEP="Шаг 7/10: применение SSH"
+LAST_STEP="Шаг 7/11: применение SSH"
 echo ">>> $LAST_STEP"
 
 if command -v getenforce &>/dev/null; then
@@ -874,7 +917,7 @@ if command -v getenforce &>/dev/null; then
             echo "[!] SELinux Enforcing, а порт зарегистрировать не удалось — sshd не сможет его открыть. Откат."
             exit 1
         else
-            echo "[!] SELinux Permissive: порт не зарегистрирован (сейчас не мешает, но сделай: semanage port -a -t ssh_port_t -p tcp $NEW_SSH_PORT)"
+            echo "[!] SELinux Permissive: порт не зарегистрирован (сделай: semanage port -a -t ssh_port_t -p tcp $NEW_SSH_PORT)"
         fi
     fi
 fi
@@ -931,18 +974,22 @@ SSH_APPLIED_OK=1
 # =============================================================================
 # Шаг 8: фаервол
 # =============================================================================
-LAST_STEP="Шаг 8/10: фаервол"
+LAST_STEP="Шаг 8/11: фаервол"
 echo ">>> $LAST_STEP"
 if systemctl is-active --quiet firewalld 2>/dev/null; then
     FIREWALL="firewalld"
     echo "[*] Активен firewalld — использую его (UFW рядом с firewalld ставить нельзя)"
     firewall-cmd --permanent --add-port="$NEW_SSH_PORT/tcp"
     if [ "$ENABLE_NETBIRD" = "y" ]; then
-        firewall-cmd --permanent --add-port=51820/udp
+        for _r in "${NETBIRD_PORTS[@]}"; do
+            _nb_port="${_r%%:*}"
+            _nb_cmt="${_r#*:}"
+            firewall-cmd --permanent --add-port="$_nb_port" >/dev/null
+            echo "[+] firewalld: открыт $_nb_port ($_nb_cmt)"
+        done
     fi
     firewall-cmd --reload
-    echo "[+] firewalld: открыт $NEW_SSH_PORT/tcp"
-    if [ "$ENABLE_NETBIRD" = "y" ]; then echo "[+] firewalld: открыт 51820/udp (NetBird)"; fi
+    echo "[+] firewalld: открыт $NEW_SSH_PORT/tcp (SSH)"
 else
     if ! command -v ufw &>/dev/null; then
         echo "[*] Устанавливаю UFW..."
@@ -957,7 +1004,12 @@ else
         ufw logging high
         ufw allow "$NEW_SSH_PORT/tcp" comment "SSH"
         if [ "$ENABLE_NETBIRD" = "y" ]; then
-            ufw allow 51820/udp comment "NetBird"
+            echo "[*] UFW: открываю порты для NetBird..."
+            for _r in "${NETBIRD_PORTS[@]}"; do
+                _nb_port="${_r%%:*}"
+                _nb_cmt="${_r#*:}"
+                ufw allow "$_nb_port" comment "$_nb_cmt"
+            done
         fi
         if ufw status 2>/dev/null | grep -q "Status: active"; then
             echo "[+] UFW уже включён"
@@ -966,22 +1018,33 @@ else
             echo "[+] UFW включён"
         fi
         if ufw status 2>/dev/null | grep -qE "^${NEW_SSH_PORT}/tcp[[:space:]]+ALLOW"; then
-            echo "[+] UFW: правило $NEW_SSH_PORT/tcp активно"
+            echo "[+] UFW: правило $NEW_SSH_PORT/tcp (SSH) активно"
         else
             echo "[!] UFW: правило для $NEW_SSH_PORT/tcp не найдено — выключаю UFW, чтобы не потерять доступ"
             ufw --force disable || true
             FIREWALL=""
         fi
+        if [ "$FIREWALL" = "ufw" ] && [ "$ENABLE_NETBIRD" = "y" ]; then
+            for _r in "${NETBIRD_PORTS[@]}"; do
+                _nb_port="${_r%%:*}"
+                _nb_cmt="${_r#*:}"
+                if ufw status 2>/dev/null | grep -qE "^${_nb_port//\//\\/}[[:space:]]+ALLOW"; then
+                    echo "[+] UFW: правило $_nb_port ($_nb_cmt) активно"
+                else
+                    echo "[!] UFW: правило $_nb_port ($_nb_cmt) не найдено — проверь: ufw status"
+                fi
+            done
+        fi
     else
         echo "[!] UFW не установился; открой порт $NEW_SSH_PORT/tcp вручную"
-        if [ "$ENABLE_NETBIRD" = "y" ]; then echo "[!] Также открой 51820/udp для NetBird"; fi
+        if [ "$ENABLE_NETBIRD" = "y" ]; then echo "[!] Также открой для NetBird: $NETBIRD_PORTS_LIST"; fi
     fi
 fi
 
 # =============================================================================
 # Шаг 9: fail2ban
 # =============================================================================
-LAST_STEP="Шаг 9/10: fail2ban"
+LAST_STEP="Шаг 9/11: fail2ban"
 echo ">>> $LAST_STEP"
 if ! command -v fail2ban-client &>/dev/null; then
     echo "[*] Устанавливаю fail2ban..."
@@ -999,7 +1062,6 @@ if command -v fail2ban-client &>/dev/null; then
         F2B_BANACTION="iptables-allports"
     fi
 
-    # Есть rsyslog → логи в файлах; нет → читаем journald
     if systemctl is-active --quiet rsyslog 2>/dev/null || systemctl is-active --quiet syslog-ng 2>/dev/null; then
         F2B_MODE="file"
     else
@@ -1093,10 +1155,74 @@ else
 fi
 
 # =============================================================================
-# Шаг 10: NetBird (опционально)
+# Шаг 10: 2FA для пользователя (проверка кода и снятие nullok)
+# =============================================================================
+if [ "$ENABLE_2FA" = "y" ]; then
+    LAST_STEP="Шаг 10/11: 2FA для $NEW_USER_NAME"
+    echo ""
+    echo ">>> $LAST_STEP"
+    GA_FILE="${USER_HOME}/.google_authenticator"
+
+    for _try in 1 2 3; do
+        rm -f "$GA_FILE"
+        echo ""
+        echo "[*] Попытка $_try/3. Отсканируй QR в приложении (Google Authenticator, Aegis и т.п.)"
+        echo "    и СОХРАНИ аварийные коды (emergency scratch codes)."
+        echo ""
+        if ! sudo -H -u "$NEW_USER_NAME" google-authenticator -t -d -f -r 3 -R 30 -w 17 -s "$GA_FILE"; then
+            echo "[!] google-authenticator завершился с ошибкой"
+            continue
+        fi
+        if [ ! -s "$GA_FILE" ]; then
+            echo "[!] Файл $GA_FILE не создан"
+            continue
+        fi
+        if ! command -v oathtool &>/dev/null; then
+            echo "[!] oathtool нет — код не проверяю, считаю 2FA настроенной"
+            TFA_OK=1
+            break
+        fi
+        _secret="$(head -n 1 "$GA_FILE")"
+        echo ""
+        printf "Введи текущий 6-значный код из приложения для проверки: "
+        ask _otp
+        _otp="${_otp//[^0-9]/}"
+        if [ -n "$_otp" ] && oathtool --totp -b -w 4 "$_secret" "$_otp" >/dev/null 2>&1; then
+            echo "[+] Код верный"
+            TFA_OK=1
+            break
+        fi
+        echo "[!] Код неверный. Проверь время на телефоне и сервере (timedatectl). Создаю заново..."
+        echo "    (удали старую запись этого сервера в приложении перед новым сканированием)"
+    done
+    unset _secret _otp
+
+    if [ "$TFA_OK" = 1 ]; then
+        chown "${NEW_USER_NAME}:${USER_GROUP}" "$GA_FILE"
+        chmod 400 "$GA_FILE"
+        sed -i -E 's/(pam_google_authenticator\.so)[[:space:]]+nullok/\1/' "$PAM_SSHD"
+        if grep -qE '^[^#]*pam_google_authenticator\.so[[:space:]]*$' "$PAM_SSHD"; then
+            echo "[+] 2FA обязательна (nullok убран из $PAM_SSHD)"
+        else
+            echo "[!] Не удалось убрать nullok — проверь $PAM_SSHD вручную"
+        fi
+    else
+        rm -f "$GA_FILE"
+        echo ""
+        echo "##############################################################"
+        echo "  [!!!] 2FA НЕ НАСТРОЕНА — сейчас вход ТОЛЬКО ПО КЛЮЧУ"
+        echo "  Исправь вручную:"
+        echo "    sudo -H -u $NEW_USER_NAME google-authenticator -t -d -f -r 3 -R 30 -w 17"
+        echo "    sudo sed -i -E 's/(pam_google_authenticator\\.so)[[:space:]]+nullok/\\1/' $PAM_SSHD"
+        echo "##############################################################"
+    fi
+fi
+
+# =============================================================================
+# Шаг 11: NetBird (опционально)
 # =============================================================================
 if [ "$ENABLE_NETBIRD" = "y" ]; then
-    LAST_STEP="Шаг 10/10: NetBird"
+    LAST_STEP="Шаг 11/11: NetBird"
     echo ""
     echo ">>> $LAST_STEP"
     if ! command -v curl &>/dev/null; then
@@ -1107,14 +1233,29 @@ if [ "$ENABLE_NETBIRD" = "y" ]; then
     elif command -v netbird &>/dev/null; then
         echo "[+] NetBird уже установлен: $(netbird version 2>/dev/null || echo ok)"
     else
-        if SKIP_UI_APP=true curl -fsSL https://pkgs.netbird.io/install.sh | sh; then
+        echo "[*] Устанавливаю NetBird (вывод установщика скрыт)..."
+        _nb_log="$(mktemp)"
+        if SKIP_UI_APP=true curl -fsSL https://pkgs.netbird.io/install.sh | sh >"$_nb_log" 2>&1; then
             echo "[+] NetBird установлен"
         else
-            echo "[!] Установка NetBird не удалась. Вручную: SKIP_UI_APP=true curl -fsSL https://pkgs.netbird.io/install.sh | sh"
+            echo "[!] Установщик NetBird вернул ошибку. Последние строки лога:"
+            tail -n 20 "$_nb_log" || true
         fi
+        if grep -q "Init already exists" "$_nb_log" 2>/dev/null; then
+            echo "    (служба netbird уже была создана пакетом — это нормально)"
+        fi
+        rm -f "$_nb_log"
     fi
     if command -v netbird &>/dev/null; then
-        systemctl enable netbird 2>/dev/null || true
+        if ! systemctl cat netbird.service >/dev/null 2>&1; then
+            netbird service install >/dev/null 2>&1 || true
+        fi
+        systemctl enable --now netbird >/dev/null 2>&1 || netbird service start >/dev/null 2>&1 || true
+        if systemctl is-active --quiet netbird; then
+            echo "[+] Служба netbird работает"
+        else
+            echo "[!] Служба netbird не запущена: journalctl -u netbird -n 30"
+        fi
         if [ -n "$NETBIRD_SETUP_KEY" ]; then
             if netbird up --setup-key "$NETBIRD_SETUP_KEY"; then
                 echo "[+] NetBird подключён"
@@ -1122,26 +1263,8 @@ if [ "$ENABLE_NETBIRD" = "y" ]; then
                 echo "[!] netbird up не удался. После скрипта: netbird up --setup-key <KEY>"
             fi
         else
-            echo "[*] Setup key не задан. После скрипта: netbird up --setup-key <KEY>"
+            echo "[*] Setup key не задан. Подключение: netbird up --setup-key <KEY>"
         fi
-    fi
-fi
-
-# =============================================================================
-# 2FA для пользователя
-# =============================================================================
-if [ "$ENABLE_2FA" = "y" ]; then
-    LAST_STEP="2FA для $NEW_USER_NAME"
-    echo ""
-    echo "[*] Настройка 2FA для $NEW_USER_NAME."
-    echo "    Отсканируй QR в приложении и СОХРАНИ аварийные коды (emergency scratch codes)."
-    echo ""
-    GA_FILE="${USER_HOME}/.google_authenticator"
-    if sudo -H -u "$NEW_USER_NAME" google-authenticator -t -d -f -r 3 -R 30 -w 17 -s "$GA_FILE" && [ -f "$GA_FILE" ]; then
-        echo "[+] 2FA настроен: $GA_FILE"
-    else
-        echo "[!] 2FA не настроился. Пока вход работает только по ключу (nullok)."
-        echo "    Выполни: sudo -u $NEW_USER_NAME google-authenticator"
     fi
 fi
 
@@ -1168,21 +1291,31 @@ echo ""
 echo "  Подключение:"
 echo "  ssh -p $NEW_SSH_PORT $NEW_USER_NAME@<IP_СЕРВЕРА>"
 echo ""
-if [ "$ENABLE_2FA" = "y" ]; then
+if [ "$ENABLE_2FA" = "y" ] && [ "$TFA_OK" = 1 ]; then
     echo "  Вход:           ключ + код 2FA (OTP)"
+    echo "  2FA:            ВКЛЮЧЕНА и обязательна"
+elif [ "$ENABLE_2FA" = "y" ]; then
+    echo "  Вход:           только ключ"
+    echo "  2FA:            НЕ НАСТРОЕНА (см. предупреждение выше!)"
 else
     echo "  Вход:           только ключ"
+    echo "  2FA:            выключена"
 fi
-echo "  2FA:            $ENABLE_2FA"
 echo "  Фаервол:        ${FIREWALL:-не настроен}"
 if [ "$ENABLE_NETBIRD" = "y" ]; then
-    echo "  NetBird:        установлен, открыт 51820/udp"
+    echo "  NetBird:        установлен"
+    echo "  Порты NetBird:  $NETBIRD_PORTS_LIST"
     if [ -z "$NETBIRD_SETUP_KEY" ]; then echo "                  выполни: netbird up --setup-key <KEY>"; fi
 else
     echo "  NetBird:        нет"
 fi
 echo ""
-echo "  Если у провайдера есть свой фаервол (Security Group) — открой там $NEW_SSH_PORT/tcp!"
+if [ "$ENABLE_NETBIRD" = "y" ]; then
+    echo "  Если у провайдера есть свой фаервол (Security Group) — открой там:"
+    echo "  $NEW_SSH_PORT/tcp, $NETBIRD_PORTS_LIST"
+else
+    echo "  Если у провайдера есть свой фаервол (Security Group) — открой там $NEW_SSH_PORT/tcp!"
+fi
 echo "=============================================="
 CREDS_SHOWN=1
 
@@ -1195,6 +1328,9 @@ echo "  ПРОВЕРКА ДОСТУПА — НЕ ЗАКРЫВАЙ ЭТУ СЕС�
 echo "=============================================="
 echo "  Открой НОВЫЙ терминал и выполни:"
 echo "    ssh -p $NEW_SSH_PORT $NEW_USER_NAME@<IP_СЕРВЕРА>"
+if [ "$TFA_OK" = 1 ]; then
+    echo "  Должен появиться запрос: Verification code:"
+fi
 echo "  Затем там же: sudo -v   (ввести пароль пользователя выше)"
 echo "  И проверь root: su -    (ввести пароль root выше)"
 echo ""
