@@ -3,6 +3,13 @@
 # Готовый скрипт по гайду How-To-Secure-A-Linux-Server.
 # Запуск ТОЛЬКО на целевом Linux-сервере: sudo bash dss.sh
 # Если падает с "command not found" — на сервере выполни: sed -i 's/\r$//' dss.sh
+# v6.4:
+#   - Шаг 1: полное обновление системы (apt update && apt upgrade -y)
+#     ДО любых вопросов и изменений; без интерактивных окон (noninteractive,
+#     старые конфиги сохраняются, needrestart не спрашивает)
+#   - заголовки шагов выделены зелёным цветом
+#   - в итоге — напоминание о перезагрузке, если она нужна после обновления
+#   - пропуск обновления: SKIP_UPGRADE=1 sudo bash dss.sh
 # v6.3:
 #   - NetBird: в фаерволе дополнительно открываются 80/tcp (HTTP),
 #     443/tcp (HTTPS), 3478/udp (NetBird STUN) + проверка правил
@@ -86,7 +93,7 @@ set -e
 # =============================================================================
 # Глобальные переменные
 # =============================================================================
-SCRIPT_VERSION="v6.3"
+SCRIPT_VERSION="v6.4"
 LAST_STEP="Подготовка"
 TS="$(date +%Y%m%d%H%M%S)"
 BACKUP_DIR="/root/dss-backup-$TS"
@@ -94,6 +101,7 @@ SSHD_CONFIG="/etc/ssh/sshd_config"
 SSHD_CONFIG_D="/etc/ssh/sshd_config.d"
 PAM_SSHD="/etc/pam.d/sshd"
 SUDOERS_FILE="/etc/sudoers.d/99-sudousers"
+TOTAL_STEPS=13
 
 NEW_USER_NAME=""
 USER_PASSWORD=""
@@ -102,6 +110,8 @@ USER_HOME=""
 NEW_SSH_PORT="${NEW_SSH_PORT:-}"
 CREDS_SHOWN=0          # итоговые данные уже выведены
 TFA_OK=0               # 2FA реально настроена и проверена
+NEED_REBOOT=0          # после обновления нужна перезагрузка
+UPGRADE_STATUS="не выполнялось"
 
 # Порты для NetBird: "порт/протокол:комментарий"
 NETBIRD_PORTS=(
@@ -132,9 +142,30 @@ APT_UPDATED=0
 SSHD_KEYS="port allowgroups allowusers permitrootlogin passwordauthentication pubkeyauthentication permitemptypasswords hostkey kexalgorithms ciphers macs loglevel x11forwarding allowtcpforwarding maxauthtries clientaliveinterval clientalivecountmax usepam challengeresponseauthentication kbdinteractiveauthentication authenticationmethods"
 KEYS_RE="$(echo $SSHD_KEYS | tr ' ' '|')"
 
+# Цвета (только для заголовков шагов). NO_COLOR=1 — без цвета.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_GREEN=$'\033[1;32m'
+    C_RESET=$'\033[0m'
+else
+    C_GREEN=""
+    C_RESET=""
+fi
+
+# Не даём apt/needrestart открывать интерактивные окна
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+
 # =============================================================================
 # Функции
 # =============================================================================
+
+# Заголовок шага (зелёным) + запоминание для сообщений об ошибке
+step() {
+    LAST_STEP="$1"
+    echo ""
+    printf '%s>>> %s%s\n' "$C_GREEN" "$1" "$C_RESET"
+}
 
 # Бэкап файла с сохранением пути: /etc/ssh/sshd_config -> $BACKUP_DIR/etc/ssh/sshd_config
 backup_file() {
@@ -297,7 +328,9 @@ pkg_install() {
             apt-get -o DPkg::Lock::Timeout=300 update -qq || true
             APT_UPDATED=1
         fi
-        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -qq "$@"
+        apt-get -o DPkg::Lock::Timeout=300 \
+            -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+            install -y -qq "$@"
     elif command -v dnf >/dev/null 2>&1; then
         dnf install -y "$@"
     elif command -v yum >/dev/null 2>&1; then
@@ -408,7 +441,7 @@ disable_keys_in_file() {
 }
 
 # =============================================================================
-# Проверки окружения
+# Проверки окружения (минимальные — до обновления)
 # =============================================================================
 if [ "$(id -u)" -ne 0 ]; then
     echo "Ошибка: запускай с root. Пример: sudo bash dss.sh"
@@ -425,6 +458,71 @@ if ! command -v systemctl &>/dev/null; then
     exit 1
 fi
 
+echo ">>> dss.sh $SCRIPT_VERSION — обновление системы, sshd -t, автооткат, ssh.socket, смена пароля root, обязательная 2FA"
+echo ">>> Хост: $(hostname)"
+
+# =============================================================================
+# Шаг 1: полное обновление системы (apt update && apt upgrade -y)
+# =============================================================================
+step "Шаг 1/$TOTAL_STEPS: обновление системы"
+if [ -n "${SKIP_UPGRADE:-}" ]; then
+    echo "[*] SKIP_UPGRADE задан — обновление пропущено"
+    UPGRADE_STATUS="пропущено (SKIP_UPGRADE)"
+elif command -v apt-get &>/dev/null; then
+    echo "[*] apt update && apt upgrade -y (может занять несколько минут)..."
+    wait_apt || true
+    if apt-get -o DPkg::Lock::Timeout=300 update; then
+        APT_UPDATED=1
+        echo "[+] Список пакетов обновлён"
+    else
+        echo "[!] apt update завершился с ошибкой — продолжаю"
+    fi
+    wait_apt || true
+    # --with-new-pkgs = поведение "apt upgrade" (ставит новые зависимости)
+    # confdef/confold = не спрашивать про изменённые конфиги, оставить текущие
+    if apt-get -o DPkg::Lock::Timeout=300 \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+        --with-new-pkgs upgrade -y; then
+        echo "[+] Система обновлена"
+        UPGRADE_STATUS="выполнено"
+    else
+        echo "[!] apt upgrade завершился с ошибкой — продолжаю (проверь позже: apt upgrade)"
+        UPGRADE_STATUS="с ошибкой"
+    fi
+    apt-get -o DPkg::Lock::Timeout=300 autoremove -y >/dev/null 2>&1 || true
+elif command -v dnf &>/dev/null; then
+    echo "[*] dnf upgrade -y (может занять несколько минут)..."
+    if dnf upgrade -y; then
+        echo "[+] Система обновлена"
+        UPGRADE_STATUS="выполнено"
+    else
+        echo "[!] dnf upgrade завершился с ошибкой — продолжаю"
+        UPGRADE_STATUS="с ошибкой"
+    fi
+elif command -v yum &>/dev/null; then
+    echo "[*] yum update -y (может занять несколько минут)..."
+    if yum update -y; then
+        echo "[+] Система обновлена"
+        UPGRADE_STATUS="выполнено"
+    else
+        echo "[!] yum update завершился с ошибкой — продолжаю"
+        UPGRADE_STATUS="с ошибкой"
+    fi
+else
+    echo "[!] Нет apt/dnf/yum — обнови систему вручную"
+    UPGRADE_STATUS="нет пакетного менеджера"
+fi
+if [ -f /var/run/reboot-required ]; then
+    NEED_REBOOT=1
+    echo "[!] После обновления нужна перезагрузка — сделаешь в конце, ПОСЛЕ проверки входа"
+elif command -v needs-restarting &>/dev/null && ! needs-restarting -r >/dev/null 2>&1; then
+    NEED_REBOOT=1
+    echo "[!] После обновления нужна перезагрузка — сделаешь в конце, ПОСЛЕ проверки входа"
+fi
+
+# =============================================================================
+# Проверки окружения (после обновления)
+# =============================================================================
 if ! command -v chpasswd &>/dev/null; then
     echo "Ошибка: не найден chpasswd (пакет passwd / shadow-utils)."
     exit 1
@@ -457,8 +555,8 @@ for _s in ssh.socket sshd.socket; do
     fi
 done
 
-echo ">>> $SCRIPT_VERSION — sshd -t, автооткат, ssh.socket, смена пароля root, обязательная 2FA"
-echo ">>> Хост: $(hostname). Служба SSH: $SSH_SERVICE${SOCKET_UNIT:+ (через $SOCKET_UNIT)}"
+echo ""
+echo "[+] Служба SSH: $SSH_SERVICE${SOCKET_UNIT:+ (через $SOCKET_UNIT)}"
 echo ""
 
 # =============================================================================
@@ -532,13 +630,11 @@ if [ "$ENABLE_NETBIRD" = "y" ]; then
     echo "[+] Для NetBird будут открыты: $NETBIRD_PORTS_LIST"
 fi
 echo "[+] Пароль root будет заменён на случайный"
-echo ""
 
 # =============================================================================
-# Шаг 0: пакеты и данные о текущей сессии (до любых изменений)
+# Шаг 2: пакеты и данные о текущей сессии (до любых изменений)
 # =============================================================================
-LAST_STEP="Шаг 0/11: проверки и пакеты"
-echo ">>> $LAST_STEP"
+step "Шаг 2/$TOTAL_STEPS: проверки и пакеты"
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
 echo "[+] Бэкапы будут в $BACKUP_DIR"
@@ -619,20 +715,17 @@ if [ -z "$OLD_SSH_PORTS" ]; then OLD_SSH_PORTS="22"; fi
 echo "[+] Текущий порт(ы) SSH: $OLD_SSH_PORTS${CLIENT_IP:+, твой IP: $CLIENT_IP}"
 
 # =============================================================================
-# Шаг 1: группы
+# Шаг 3: группы
 # =============================================================================
-LAST_STEP="Шаг 1/11: группы"
-echo ""
-echo ">>> $LAST_STEP"
+step "Шаг 3/$TOTAL_STEPS: группы"
 getent group sshusers >/dev/null 2>&1 || groupadd sshusers
 getent group sudousers >/dev/null 2>&1 || groupadd sudousers
 echo "[+] Группы sshusers, sudousers готовы"
 
 # =============================================================================
-# Шаг 2: пользователь + пароль root
+# Шаг 4: пользователь + пароль root
 # =============================================================================
-LAST_STEP="Шаг 2/11: пользователь $NEW_USER_NAME и пароль root"
-echo ">>> $LAST_STEP"
+step "Шаг 4/$TOTAL_STEPS: пользователь $NEW_USER_NAME и пароль root"
 
 _up="$(gen_password)"
 _rp="$(gen_password)"
@@ -675,10 +768,9 @@ unset _up _rp
 echo "    Старый /etc/shadow сохранён в $BACKUP_DIR/shadow.orig"
 
 # =============================================================================
-# Шаг 3: sudo
+# Шаг 5: sudo
 # =============================================================================
-LAST_STEP="Шаг 3/11: sudo"
-echo ">>> $LAST_STEP"
+step "Шаг 5/$TOTAL_STEPS: sudo"
 mkdir -p /etc/sudoers.d
 chmod 750 /etc/sudoers.d
 if ! grep -qE '^[[:space:]]*[#@]includedir[[:space:]]+/etc/sudoers.d' /etc/sudoers 2>/dev/null; then
@@ -707,10 +799,9 @@ else
 fi
 
 # =============================================================================
-# Шаг 4: SSH-ключ
+# Шаг 6: SSH-ключ
 # =============================================================================
-LAST_STEP="Шаг 4/11: SSH-ключ"
-echo ">>> $LAST_STEP"
+step "Шаг 6/$TOTAL_STEPS: SSH-ключ"
 if [ -z "$PUBKEY" ]; then
     echo "[*] Вставь публичный SSH-ключ (одна строка, cat ~/.ssh/id_ed25519.pub):"
     ask PUBKEY
@@ -745,10 +836,9 @@ chmod 600 "${USER_HOME}/.ssh/authorized_keys"
 chown -R "${NEW_USER_NAME}:${USER_GROUP}" "${USER_HOME}/.ssh"
 
 # =============================================================================
-# Шаг 5: sshd_config
+# Шаг 7: sshd_config
 # =============================================================================
-LAST_STEP="Шаг 5/11: sshd_config"
-echo ">>> $LAST_STEP"
+step "Шаг 7/$TOTAL_STEPS: sshd_config"
 backup_file "$SSHD_CONFIG"
 SSH_CHANGED=1
 
@@ -856,10 +946,9 @@ echo "[+] Эффективный конфиг: Port $NEW_SSH_PORT, пароли 
 if [ "$ENABLE_2FA" = "y" ]; then echo "[+] Эффективный конфиг: требуется ключ + keyboard-interactive (OTP)"; fi
 
 # =============================================================================
-# Шаг 6: PAM / 2FA
+# Шаг 8: PAM / 2FA
 # =============================================================================
-LAST_STEP="Шаг 6/11: PAM / 2FA"
-echo ">>> $LAST_STEP"
+step "Шаг 8/$TOTAL_STEPS: PAM / 2FA"
 if [ "$ENABLE_2FA" = "y" ]; then
     if [ ! -f "$PAM_SSHD" ]; then
         echo "[!] Нет $PAM_SSHD — 2FA через PAM невозможна. Откат."
@@ -887,16 +976,15 @@ if [ "$ENABLE_2FA" = "y" ]; then
         sed -i -E 's/^([[:space:]]*auth[[:space:]]+substack[[:space:]]+password-auth.*)$/# DSS-disabled: \1/' "$PAM_SSHD"
         echo "[+] auth substack password-auth отключён"
     fi
-    echo "[+] PAM: ключ + OTP (временно nullok — уберётся после настройки 2FA на шаге 10)"
+    echo "[+] PAM: ключ + OTP (временно nullok — уберётся после настройки 2FA на шаге 12)"
 else
     echo "[+] 2FA выключена — PAM не трогаю (вход только по ключу)"
 fi
 
 # =============================================================================
-# Шаг 7: применение SSH (SELinux, ssh.socket, перезапуск, проверка порта)
+# Шаг 9: применение SSH (SELinux, ssh.socket, перезапуск, проверка порта)
 # =============================================================================
-LAST_STEP="Шаг 7/11: применение SSH"
-echo ">>> $LAST_STEP"
+step "Шаг 9/$TOTAL_STEPS: применение SSH"
 
 if command -v getenforce &>/dev/null; then
     _se="$(getenforce 2>/dev/null || echo Disabled)"
@@ -972,10 +1060,9 @@ fi
 SSH_APPLIED_OK=1
 
 # =============================================================================
-# Шаг 8: фаервол
+# Шаг 10: фаервол
 # =============================================================================
-LAST_STEP="Шаг 8/11: фаервол"
-echo ">>> $LAST_STEP"
+step "Шаг 10/$TOTAL_STEPS: фаервол"
 if systemctl is-active --quiet firewalld 2>/dev/null; then
     FIREWALL="firewalld"
     echo "[*] Активен firewalld — использую его (UFW рядом с firewalld ставить нельзя)"
@@ -1042,10 +1129,9 @@ else
 fi
 
 # =============================================================================
-# Шаг 9: fail2ban
+# Шаг 11: fail2ban
 # =============================================================================
-LAST_STEP="Шаг 9/11: fail2ban"
-echo ">>> $LAST_STEP"
+step "Шаг 11/$TOTAL_STEPS: fail2ban"
 if ! command -v fail2ban-client &>/dev/null; then
     echo "[*] Устанавливаю fail2ban..."
     if ! command -v apt-get &>/dev/null; then ensure_epel; fi
@@ -1155,12 +1241,10 @@ else
 fi
 
 # =============================================================================
-# Шаг 10: 2FA для пользователя (проверка кода и снятие nullok)
+# Шаг 12: 2FA для пользователя (проверка кода и снятие nullok)
 # =============================================================================
 if [ "$ENABLE_2FA" = "y" ]; then
-    LAST_STEP="Шаг 10/11: 2FA для $NEW_USER_NAME"
-    echo ""
-    echo ">>> $LAST_STEP"
+    step "Шаг 12/$TOTAL_STEPS: 2FA для $NEW_USER_NAME"
     GA_FILE="${USER_HOME}/.google_authenticator"
 
     for _try in 1 2 3; do
@@ -1219,12 +1303,10 @@ if [ "$ENABLE_2FA" = "y" ]; then
 fi
 
 # =============================================================================
-# Шаг 11: NetBird (опционально)
+# Шаг 13: NetBird (опционально)
 # =============================================================================
 if [ "$ENABLE_NETBIRD" = "y" ]; then
-    LAST_STEP="Шаг 11/11: NetBird"
-    echo ""
-    echo ">>> $LAST_STEP"
+    step "Шаг 13/$TOTAL_STEPS: NetBird"
     if ! command -v curl &>/dev/null; then
         pkg_install curl || true
     fi
@@ -1309,6 +1391,10 @@ if [ "$ENABLE_NETBIRD" = "y" ]; then
 else
     echo "  NetBird:        нет"
 fi
+echo "  Обновление ОС:  $UPGRADE_STATUS"
+if [ "$NEED_REBOOT" = 1 ]; then
+    echo "  [!] Нужна перезагрузка: sudo reboot  (ТОЛЬКО после проверки входа!)"
+fi
 echo ""
 if [ "$ENABLE_NETBIRD" = "y" ]; then
     echo "  Если у провайдера есть свой фаервол (Security Group) — открой там:"
@@ -1345,6 +1431,9 @@ case "${INPUT_CHECK,,}" in
         ;;
     *)
         echo "[+] Отлично, доступ подтверждён."
+        if [ "$NEED_REBOOT" = 1 ]; then
+            echo "[!] Теперь можно перезагрузить сервер: sudo reboot"
+        fi
         ;;
 esac
 
