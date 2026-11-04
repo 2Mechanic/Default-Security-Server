@@ -565,11 +565,11 @@ echo ""
 echo "[*] Параметры..."
 echo ""
 
-printf "Введите желаемый логин [по умолчанию snegg000]: "
+printf "Введите желаемый логин [по умолчанию userssh]: "
 ask INPUT_USER
-NEW_USER_NAME="${INPUT_USER:-snegg000}"
+NEW_USER_NAME="${INPUT_USER:-userssh}"
 NEW_USER_NAME="${NEW_USER_NAME// /}"
-if [ -z "$NEW_USER_NAME" ]; then NEW_USER_NAME="snegg000"; fi
+if [ -z "$NEW_USER_NAME" ]; then NEW_USER_NAME="userssh"; fi
 if [ "$NEW_USER_NAME" = "root" ]; then
     echo "[!] Логин не может быть root. Выход."
     exit 1
